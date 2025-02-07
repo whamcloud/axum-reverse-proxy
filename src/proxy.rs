@@ -1,11 +1,37 @@
 use axum::body::Body;
 use http::StatusCode;
 use http_body_util::BodyExt;
+use hyper_tls::HttpsConnector;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use std::convert::Infallible;
 use tracing::{error, trace};
 
 use crate::websocket;
+
+#[derive(Clone)]
+enum ClientConnector {
+    Http(Client<HttpConnector, Body>),
+    Tls(Client<HttpsConnector<HttpConnector>, Body>),
+}
+
+trait ClientRequest {
+    fn request(
+        &self,
+        req: http::Request<axum::body::Body>,
+    ) -> hyper_util::client::legacy::ResponseFuture;
+}
+
+impl ClientRequest for ClientConnector {
+    fn request(
+        &self,
+        req: http::Request<axum::body::Body>,
+    ) -> hyper_util::client::legacy::ResponseFuture {
+        match self {
+            ClientConnector::Http(client) => client.request(req),
+            ClientConnector::Tls(client) => client.request(req),
+        }
+    }
+}
 
 /// A reverse proxy that forwards HTTP requests to an upstream server.
 ///
@@ -16,7 +42,7 @@ use crate::websocket;
 pub struct ReverseProxy {
     path: String,
     target: String,
-    client: Client<HttpConnector, Body>,
+    client: ClientConnector,
 }
 
 impl ReverseProxy {
@@ -55,6 +81,36 @@ impl ReverseProxy {
         Self::new_with_client(path, target, client)
     }
 
+    /// Creates a new `ReverseProxy` instance using an Https connector.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The base path to match incoming requests against (e.g., "/api")
+    /// * `target` - The upstream server URL to forward requests to (e.g., "https://api.example.com")
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use axum_reverse_proxy::ReverseProxy;
+    ///
+    /// let proxy = ReverseProxy::new_tls("/api", "https://api.example.com");
+    /// ```
+    pub fn new_tls<S>(path: S, target: S) -> Self
+    where
+        S: Into<String>,
+    {
+        let connector = HttpsConnector::new();
+
+        let client = Client::builder(hyper_util::rt::TokioExecutor::new())
+            .pool_idle_timeout(std::time::Duration::from_secs(60))
+            .pool_max_idle_per_host(32)
+            .retry_canceled_requests(true)
+            .set_host(true)
+            .build(connector);
+
+        Self::new_with_tls_client(path, target, client)
+    }
+
     /// Creates a new `ReverseProxy` instance with a custom HTTP client.
     ///
     /// This method allows for more fine-grained control over the proxy behavior by accepting
@@ -71,14 +127,60 @@ impl ReverseProxy {
     /// ```rust
     /// use axum_reverse_proxy::ReverseProxy;
     /// use hyper_util::client::legacy::{Client, connect::HttpConnector};
+    /// use hyper_tls::HttpsConnector;
     /// use axum::body::Body;
     /// use hyper_util::rt::TokioExecutor;
     ///
     /// let client = Client::builder(TokioExecutor::new())
     ///     .pool_idle_timeout(std::time::Duration::from_secs(120))
-    ///     .build(HttpConnector::new());
+    ///     .build(HttpsConnector::<HttpConnector>::new());
     ///
-    /// let proxy = ReverseProxy::new_with_client(
+    /// let proxy = ReverseProxy::new_with_tls_client(
+    ///     "/api",
+    ///     "https://api.example.com",
+    ///     client,
+    /// );
+    /// ```
+    pub fn new_with_tls_client<S>(
+        path: S,
+        target: S,
+        client: Client<HttpsConnector<HttpConnector>, Body>,
+    ) -> Self
+    where
+        S: Into<String>,
+    {
+        Self {
+            path: path.into(),
+            target: target.into(),
+            client: ClientConnector::Tls(client),
+        }
+    }
+
+    /// Creates a new `ReverseProxy` instance with a custom HTTPS client.
+    ///
+    /// This method allows for more fine-grained control over the proxy behavior by accepting
+    /// a pre-configured HTTPS client.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The base path to match incoming requests against
+    /// * `target` - The upstream server URL to forward requests to
+    /// * `client` - A custom-configured HTTPS client
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use axum_reverse_proxy::ReverseProxy;
+    /// use hyper_tls::HttpsConnector;
+    /// use hyper_util::client::legacy::Client;
+    /// use axum::body::Body;
+    /// use hyper_util::rt::TokioExecutor;
+    ///
+    /// let client = Client::builder(TokioExecutor::new())
+    ///     .pool_idle_timeout(std::time::Duration::from_secs(120))
+    ///     .build(HttpsConnector::new());
+    ///
+    /// let proxy = ReverseProxy::new_with_tls_client(
     ///     "/api",
     ///     "https://api.example.com",
     ///     client,
@@ -91,7 +193,7 @@ impl ReverseProxy {
         Self {
             path: path.into(),
             target: target.into(),
-            client,
+            client: ClientConnector::Http(client),
         }
     }
 
