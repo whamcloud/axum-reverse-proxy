@@ -243,9 +243,9 @@ impl ReverseProxy {
 
                 // Forward headers
                 for (key, value) in req.headers() {
-                    if key != "host" {
+                    //if key != "host" {
                         builder = builder.header(key, value);
-                    }
+                    //}
                 }
 
                 // Take the request body
